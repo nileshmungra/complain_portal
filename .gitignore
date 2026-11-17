@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+/config/local.php
+/config/secrets.php
+/storage/
+/farmer_complain_db.sql
+*.log
+Thumbs.db
+.DS_Store
