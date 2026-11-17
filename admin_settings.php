@@ -3,6 +3,7 @@ require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/complaint_uploads.php';
 require_once __DIR__ . '/includes/xlsx.php';
 require_once __DIR__ . '/includes/admin_navigation.php';
+require_once __DIR__ . '/includes/complaint_workflow.php';
 
 requireAdministrator($currentUser);
 
@@ -197,6 +198,7 @@ $managedComplaints = fetchComplaintRows(
      LIMIT {$pageSize} OFFSET {$offset}",
     $managementScope
 );
+$workflowStageLabels = getComplaintWorkflowStageLabels($conn, $managedComplaints);
 $activeProductCount = (int) $conn->query('SELECT COUNT(*) FROM products WHERE is_active = 1')->fetch_row()[0];
 $rangeStart = $managedComplaints === [] ? 0 : $offset + 1;
 $rangeEnd = $offset + count($managedComplaints);
@@ -303,6 +305,7 @@ $rangeEnd = $offset + count($managedComplaints);
                                     <span class="complaint-number"><?php echo escapeHtml(formatComplaintReference((int) $complaint['id'], $complaint['public_reference'])); ?></span>
                                     <h3><?php echo escapeHtml($complaint['title']); ?></h3>
                                     <p><?php echo escapeHtml(implode(' · ', array_filter([$complaint['farmer_name'], $complaint['farmer_mobile'], $complaint['product'], $complaint['wo_number'] !== null ? 'Reg / WO No.: ' . $complaint['wo_number'] : null, $complaint['status']], static fn ($value) => $value !== null && $value !== ''))); ?></p>
+                                    <p class="workflow-stage-label">Stage: <?php echo escapeHtml($workflowStageLabels[(int) $complaint['id']] ?? 'Workflow stage unavailable'); ?></p>
                                 </div>
                                 <div class="admin-complaint-actions">
                                     <a class="secondary-button" href="admin_edit_complaint.php?id=<?php echo (int) $complaint['id']; ?>">Edit</a>

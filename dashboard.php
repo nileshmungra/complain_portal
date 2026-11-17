@@ -1,6 +1,7 @@
 <?php
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/complaint_filters.php';
+require_once __DIR__ . '/includes/complaint_workflow.php';
 
 notifyOverdueComplaints($conn);
 $dashboardOptions = require __DIR__ . '/config/complaints.php';
@@ -149,6 +150,7 @@ $complaints = $issueConditions === []
      ORDER BY c.created_at DESC, c.id DESC",
         $issueScope
     );
+$workflowStageLabels = getComplaintWorkflowStageLabels($conn, $complaints);
 $complaintGroups = [];
 foreach ($complaints as $complaint) {
     $groupKey = is_string($complaint['farmer_mobile']) && $complaint['farmer_mobile'] !== ''
@@ -483,7 +485,10 @@ function renderComplaintChart(array $items, string $filter, array $activeFilters
                                 <?php endif; ?>
                             </td>
                             <td data-label="District"><?php echo escapeHtml($complaint['district']); ?></td>
-                            <td data-label="Status"><span class="status-pill <?php echo $statusClass; ?>"><?php echo escapeHtml($complaint['status']); ?></span></td>
+                            <td data-label="Status">
+                                <span class="status-pill <?php echo $statusClass; ?>"><?php echo escapeHtml($complaint['status']); ?></span>
+                                <small class="workflow-stage-label"><?php echo escapeHtml($workflowStageLabels[(int) $complaint['id']] ?? 'Workflow stage unavailable'); ?></small>
+                            </td>
                             <td data-label="Submitted">
                                 <?php if (is_string($complaint['created_at']) && $complaint['created_at'] !== ''): ?>
                                     <?php echo escapeHtml(date('M j, Y', strtotime($complaint['created_at']))); ?>
@@ -506,6 +511,7 @@ function renderComplaintChart(array $items, string $filter, array $activeFilters
                                 </div>
                                 <div class="complaint-card-status">
                                     <span class="status-pill <?php echo $statusClass; ?>"><?php echo escapeHtml($complaint['status']); ?></span>
+                                    <small class="workflow-stage-label"><?php echo escapeHtml($workflowStageLabels[(int) $complaint['id']] ?? 'Workflow stage unavailable'); ?></small>
                                     <?php if (is_string($complaint['created_at']) && $complaint['created_at'] !== ''): ?>
                                         <time datetime="<?php echo escapeHtml($complaint['created_at']); ?>"><?php echo date('M j, Y', strtotime($complaint['created_at'])); ?></time>
                                     <?php else: ?>
@@ -683,6 +689,9 @@ function renderComplaintChart(array $items, string $filter, array $activeFilters
                                 </section>
                             <?php endif; ?>
                             <div class="complaint-material-actions">
+                                <?php if (in_array($currentUser['role'], ['admin', 'department'], true)): ?>
+                                    <a class="secondary-button" href="complaint_workflow.php?id=<?php echo (int) $complaint['id']; ?>">Approval / ERP SO workflow</a>
+                                <?php endif; ?>
                                 <a class="secondary-button" href="complaint_materials.php?id=<?php echo (int) $complaint['id']; ?>">Record sample / faulty return</a>
                                 <a class="secondary-button" href="complaint_review_print.php?id=<?php echo (int) $complaint['id']; ?>" target="_blank" rel="noopener noreferrer">Print for review / approval</a>
                                 <a class="secondary-button" href="complaint_department_print.php?id=<?php echo (int) $complaint['id']; ?>" target="_blank" rel="noopener noreferrer">Department print / PDF</a>

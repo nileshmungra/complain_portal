@@ -9,6 +9,7 @@ function renderAdminNavigation(string $activeSection): void
         'dealers' => ['Dealers', 'admin_dealers.php'],
         'bulk' => ['Bulk actions', 'admin_bulk_complaints.php'],
         'workflow' => ['Workflow & SLA', 'admin_workflow.php'],
+        'workflow_report' => ['Stage time report', 'admin_workflow_report.php'],
         'products' => ['Products', 'admin_products.php'],
         'reports' => ['Reports', 'admin_reports.php'],
         'audit' => ['Audit log', 'admin_audit_log.php'],

@@ -2,6 +2,8 @@
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/farmer.php';
 require_once __DIR__ . '/includes/location_catalog.php';
+require_once __DIR__ . '/includes/complaint_uploads.php';
+require_once __DIR__ . '/includes/complaint_workflow.php';
 
 requireAdministrator($currentUser);
 
@@ -19,6 +21,15 @@ if (!$complaint) {
     http_response_code(404);
     exit('Complaint not found.');
 }
+$attachmentStatement = $conn->prepare(
+    'SELECT id, category, original_name, created_at
+     FROM complaint_attachments
+     WHERE complaint_id = ?
+     ORDER BY created_at, id'
+);
+$attachmentStatement->bind_param('i', $complaintId);
+$attachmentStatement->execute();
+$complaintAttachments = $attachmentStatement->get_result()->fetch_all(MYSQLI_ASSOC);
 $selectedDealer = null;
 if (!empty($complaint['dealer_id'])) {
     $dealerStatement = $conn->prepare('SELECT dealer_code, name FROM dealers WHERE id = ? LIMIT 1');
@@ -55,6 +66,7 @@ $departmentStatement = $conn->prepare(
 $departmentStatement->bind_param('i', $complaintId);
 $departmentStatement->execute();
 $assignedDepartments = array_column($departmentStatement->get_result()->fetch_all(MYSQLI_ASSOC), 'department');
+$existingAssignmentDepartments = $assignedDepartments;
 if ($assignedDepartments === []) {
     $assignedDepartments = array_values(array_filter(array_map('trim', explode(',', $complaint['department']))));
 }
@@ -90,6 +102,7 @@ $form = [
 ];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $uploadResult = validateComplaintUploads($_FILES);
     foreach ($form as $key => $default) {
         $postedValue = $_POST[$key] ?? $default;
         $form[$key] = is_string($postedValue) ? trim($postedValue) : $default;
@@ -191,6 +204,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         || array_diff($postedDepartments, $departmentOptions) !== []
     ) {
         $errorMessage = 'Select at least one valid assigned department.';
+    } elseif ($uploadResult['error'] !== '') {
+        $errorMessage = $uploadResult['error'];
     } else {
         $supplyDate = $form['supply_date'] !== '' ? $form['supply_date'] : null;
         $farmerMobile = $form['farmer_mobile'] !== '' ? $form['farmer_mobile'] : null;
@@ -204,130 +219,161 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $invoiceReference = $form['invoice_reference'] !== '' ? $form['invoice_reference'] : null;
         $woNumber = $form['wo_number'] !== '' ? $form['wo_number'] : null;
         $departmentRoute = implode(', ', $postedDepartments);
-        $conn->begin_transaction();
-
+        $savedAttachmentPaths = [];
         try {
-            [$form['state'], $form['district'], $form['taluka'], $form['village']] = addLocationPath(
-                $conn,
-                $form['state'],
-                $form['district'],
-                $form['taluka'],
-                $form['village']
-            );
-            $updateStatement = $conn->prepare(
-                'UPDATE complaints
-                 SET title = ?, farmer_name = ?, farmer_mobile = ?, state = ?, village = ?, taluka = ?, district = ?,
-                     complaint_type = ?, product = ?, supply_date = ?, quantity_supplied = ?,
-                     quantity_unit = ?, actual_product = ?, actual_quantity_supplied = ?, actual_quantity_unit = ?,
-                     invoice_reference = ?, wo_number = ?, department = ?, details = ?, status = ?
-                 WHERE id = ?'
-            );
-            $types = str_repeat('s', 20) . 'i';
-            $updateStatement->bind_param(
-                $types,
-                $form['title'],
-                $form['farmer_name'],
-                $farmerMobile,
-                $form['state'],
-                $form['village'],
-                $form['taluka'],
-                $form['district'],
-                $form['complaint_type'],
-                $form['product'],
-                $supplyDate,
-                $quantity,
-                $quantityUnit,
-                $actualProduct,
-                $actualQuantity,
-                $actualQuantityUnit,
-                $invoiceReference,
-                $woNumber,
-                $departmentRoute,
-                $form['details'],
-                $form['status'],
-                $complaintId
-            );
-            $updateStatement->execute();
-
-            $resolvedAt = in_array($form['status'], ['Closed', 'Resolved'], true)
-                ? ($complaint['resolved_at'] ?? date('Y-m-d H:i:s'))
-                : null;
-            $resolutionStatement = $conn->prepare('UPDATE complaints SET resolved_at = ? WHERE id = ?');
-            $resolutionStatement->bind_param('si', $resolvedAt, $complaintId);
-            $resolutionStatement->execute();
-
-            $deleteAssignments = $conn->prepare('DELETE FROM complaint_department_assignments WHERE complaint_id = ?');
-            $deleteAssignments->bind_param('i', $complaintId);
-            $deleteAssignments->execute();
-            $insertAssignment = $conn->prepare(
-                'INSERT INTO complaint_department_assignments (complaint_id, department) VALUES (?, ?)'
-            );
-            foreach ($postedDepartments as $department) {
-                $insertAssignment->bind_param('is', $complaintId, $department);
-                $insertAssignment->execute();
-            }
-
-            $statusChanged = $complaint['status'] !== $form['status'];
-            $departmentsChanged = array_diff($postedDepartments, $previousDepartments) !== []
-                || array_diff($previousDepartments, $postedDepartments) !== [];
-            $complaintReference = formatComplaintReference($complaintId, $complaint['public_reference']);
-            if ($statusChanged) {
-                notifyUserIds(
+            $uploadDirectory = $uploadResult['files'] !== []
+                ? ensureComplaintAttachmentStorage($complaintId)
+                : '';
+            $conn->begin_transaction();
+            try {
+                [$form['state'], $form['district'], $form['taluka'], $form['village']] = addLocationPath(
                     $conn,
-                    [(int) $complaint['created_by']],
-                    'status',
-                    'Complaint status updated',
-                    $complaintReference . ' is now ' . $form['status'] . '.',
+                    $form['state'],
+                    $form['district'],
+                    $form['taluka'],
+                    $form['village']
+                );
+                $updateStatement = $conn->prepare(
+                    'UPDATE complaints
+                     SET title = ?, farmer_name = ?, farmer_mobile = ?, state = ?, village = ?, taluka = ?, district = ?,
+                         complaint_type = ?, product = ?, supply_date = ?, quantity_supplied = ?,
+                         quantity_unit = ?, actual_product = ?, actual_quantity_supplied = ?, actual_quantity_unit = ?,
+                         invoice_reference = ?, wo_number = ?, department = ?, details = ?, status = ?
+                     WHERE id = ?'
+                );
+                $types = str_repeat('s', 20) . 'i';
+                $updateStatement->bind_param(
+                    $types,
+                    $form['title'],
+                    $form['farmer_name'],
+                    $farmerMobile,
+                    $form['state'],
+                    $form['village'],
+                    $form['taluka'],
+                    $form['district'],
+                    $form['complaint_type'],
+                    $form['product'],
+                    $supplyDate,
+                    $quantity,
+                    $quantityUnit,
+                    $actualProduct,
+                    $actualQuantity,
+                    $actualQuantityUnit,
+                    $invoiceReference,
+                    $woNumber,
+                    $departmentRoute,
+                    $form['details'],
+                    $form['status'],
                     $complaintId
                 );
-                notifyComplaintDepartments(
-                    $conn,
-                    $postedDepartments,
-                    'status',
-                    'Complaint status updated',
-                    $complaintReference . ' is now ' . $form['status'] . '.',
-                    $complaintId
+                $updateStatement->execute();
+
+                $resolvedAt = in_array($form['status'], ['Closed', 'Resolved'], true)
+                    ? ($complaint['resolved_at'] ?? date('Y-m-d H:i:s'))
+                    : null;
+                $resolutionStatement = $conn->prepare('UPDATE complaints SET resolved_at = ? WHERE id = ?');
+                $resolutionStatement->bind_param('si', $resolvedAt, $complaintId);
+                $resolutionStatement->execute();
+
+                $deleteAssignment = $conn->prepare(
+                    'DELETE FROM complaint_department_assignments
+                     WHERE complaint_id = ? AND department = ?'
                 );
-            }
-            if ($departmentsChanged) {
-                $newDepartments = array_values(array_diff($postedDepartments, $previousDepartments));
-                notifyComplaintDepartments(
-                    $conn,
-                    $newDepartments,
-                    'assignment',
-                    'Complaint assigned to your department',
-                    $complaintReference . ' has been assigned to ' . implode(', ', $newDepartments) . '.',
-                    $complaintId
+                foreach (array_diff($existingAssignmentDepartments, $postedDepartments) as $department) {
+                    $deleteAssignment->bind_param('is', $complaintId, $department);
+                    $deleteAssignment->execute();
+                }
+                $insertAssignment = $conn->prepare(
+                    'INSERT IGNORE INTO complaint_department_assignments (complaint_id, department) VALUES (?, ?)'
                 );
-            }
-            recordAuditEvent(
-                $conn,
-                (int) $currentUser['id'],
-                'complaint.updated',
-                'complaint',
-                $complaintId,
-                $complaintReference . ' was updated.',
-                [
-                    'before' => [
-                        'status' => $complaint['status'],
-                        'product' => $complaint['product'],
-                        'department' => $complaint['department']
-                    ],
-                    'after' => [
-                        'status' => $form['status'],
-                        'product' => $form['product'],
-                        'department' => $departmentRoute
+                foreach (array_diff($postedDepartments, $existingAssignmentDepartments) as $department) {
+                    $insertAssignment->bind_param('is', $complaintId, $department);
+                    $insertAssignment->execute();
+                }
+
+                if ($uploadResult['files'] !== []) {
+                    $savedAttachmentPaths = insertComplaintWorkflowAttachments(
+                        $conn,
+                        $complaintId,
+                        $uploadResult['files'],
+                        'complaint',
+                        (int) $currentUser['id'],
+                        $uploadDirectory
+                    );
+                }
+
+                $statusChanged = $complaint['status'] !== $form['status'];
+                $newlyAssignedDepartments = array_values(array_unique(array_merge(
+                    array_diff($postedDepartments, $previousDepartments),
+                    array_diff($postedDepartments, $existingAssignmentDepartments)
+                )));
+                $departmentsChanged = $newlyAssignedDepartments !== []
+                    || array_diff($previousDepartments, $postedDepartments) !== []
+                    || array_diff($existingAssignmentDepartments, $postedDepartments) !== [];
+                $complaintReference = formatComplaintReference($complaintId, $complaint['public_reference']);
+                if ($statusChanged) {
+                    notifyUserIds(
+                        $conn,
+                        [(int) $complaint['created_by']],
+                        'status',
+                        'Complaint status updated',
+                        $complaintReference . ' is now ' . $form['status'] . '.',
+                        $complaintId
+                    );
+                    notifyComplaintDepartments(
+                        $conn,
+                        $postedDepartments,
+                        'status',
+                        'Complaint status updated',
+                        $complaintReference . ' is now ' . $form['status'] . '.',
+                        $complaintId
+                    );
+                }
+                if ($newlyAssignedDepartments !== []) {
+                    notifyComplaintDepartments(
+                        $conn,
+                        $newlyAssignedDepartments,
+                        'assignment',
+                        'Complaint assigned to your department',
+                        $complaintReference . ' has been assigned to ' . implode(', ', $newlyAssignedDepartments) . '.',
+                        $complaintId
+                    );
+                }
+                recordAuditEvent(
+                    $conn,
+                    (int) $currentUser['id'],
+                    'complaint.updated',
+                    'complaint',
+                    $complaintId,
+                    $complaintReference . ' was updated.',
+                    [
+                        'before' => [
+                            'status' => $complaint['status'],
+                            'product' => $complaint['product'],
+                            'department' => $complaint['department']
+                        ],
+                        'after' => [
+                            'status' => $form['status'],
+                            'product' => $form['product'],
+                            'department' => $departmentRoute
+                        ],
+                        'attachments_added' => count($uploadResult['files'])
                     ]
-                ]
-            );
-            $conn->commit();
+                );
+                $conn->commit();
+            } catch (Throwable $exception) {
+                $conn->rollback();
+                removeComplaintWorkflowAttachments($savedAttachmentPaths);
+                throw $exception;
+            }
             $_SESSION['flash_success'] = 'Complaint updated successfully.';
             header('Location: admin_settings.php#complaints');
             exit;
         } catch (mysqli_sql_exception $exception) {
-            $conn->rollback();
             error_log('Complaint update database error: ' . $exception->getMessage());
             $errorMessage = 'The complaint could not be updated because of a database error.';
+        } catch (RuntimeException $exception) {
+            $errorMessage = $exception->getMessage();
         }
     }
 }
@@ -365,7 +411,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <?php if ($errorMessage !== ''): ?>
                 <div class="notice notice--error" role="alert"><?php echo escapeHtml($errorMessage); ?></div>
             <?php endif; ?>
-            <form method="POST" action="admin_edit_complaint.php?id=<?php echo (int) $complaintId; ?>" class="form-stack">
+            <form method="POST" action="admin_edit_complaint.php?id=<?php echo (int) $complaintId; ?>" enctype="multipart/form-data" class="form-stack">
                 <input type="hidden" name="csrf_token" value="<?php echo escapeHtml($csrfToken); ?>">
                 <input type="hidden" name="complaint_id" value="<?php echo (int) $complaintId; ?>">
                 <section class="complaint-form-section">
@@ -468,6 +514,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         </div>
                         <div class="field"><label for="invoice_reference">Invoice / challan reference</label><input id="invoice_reference" name="invoice_reference" maxlength="100" value="<?php echo escapeHtml($form['invoice_reference']); ?>"></div>
                         <div class="field field--full"><label for="details">Complaint details</label><textarea id="details" name="details" maxlength="10000"><?php echo escapeHtml($form['details']); ?></textarea></div>
+                    </div>
+                </section>
+                <section class="complaint-form-section">
+                    <header class="form-section-heading">
+                        <span class="section-number">04</span>
+                        <div><h2>Attachments</h2><p>Add photos, videos, or documents to this complaint. Existing attachments will be kept.</p></div>
+                    </header>
+                    <?php if ($complaintAttachments !== []): ?>
+                        <div class="material-history-list">
+                            <?php foreach ($complaintAttachments as $attachment): ?>
+                                <article class="material-history-entry">
+                                    <span class="eyebrow"><?php echo escapeHtml($attachment['category']); ?></span>
+                                    <h3><?php echo escapeHtml($attachment['original_name']); ?></h3>
+                                    <p class="field-hint"><?php echo escapeHtml(date('d-m-Y H:i', strtotime($attachment['created_at']))); ?></p>
+                                    <a href="download_attachment.php?id=<?php echo (int) $attachment['id']; ?>" target="_blank" rel="noopener noreferrer">Open / download</a>
+                                </article>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php else: ?>
+                        <p class="field-hint">No attachments have been added to this complaint.</p>
+                    <?php endif; ?>
+                    <div class="form-grid">
+                        <div class="field field--full">
+                            <label for="edit-complaint-images">Add images</label>
+                            <input id="edit-complaint-images" type="file" name="images[]" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" multiple>
+                        </div>
+                        <div class="field field--full">
+                            <label for="edit-complaint-documents">Add documents</label>
+                            <input id="edit-complaint-documents" type="file" name="documents[]" accept=".pdf,.docx,.xlsx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" multiple>
+                        </div>
+                        <div class="field field--full">
+                            <label for="edit-complaint-videos">Add videos</label>
+                            <input id="edit-complaint-videos" type="file" name="videos[]" accept=".mp4,.webm,video/mp4,video/webm" multiple>
+                            <p class="field-hint">You can add up to 5 files per save, up to 10 MB each. Supported: JPG, PNG, WEBP, PDF, DOCX, XLSX, MP4, and WEBM.</p>
+                        </div>
                     </div>
                 </section>
                 <div class="form-actions">

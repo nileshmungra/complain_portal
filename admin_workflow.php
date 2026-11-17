@@ -1,6 +1,7 @@
 <?php
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/admin_navigation.php';
+require_once __DIR__ . '/includes/complaint_workflow.php';
 
 requireAdministrator($currentUser);
 notifyOverdueComplaints($conn);
@@ -10,8 +11,13 @@ $successMessage = $_SESSION['flash_success'] ?? '';
 unset($_SESSION['flash_success']);
 $csrfToken = getCsrfToken();
 $slaDays = (int) getPortalSetting($conn, 'sla_business_days', '5');
+$stageTargetDefinitions = complaintWorkflowTargetDefinitions();
+$stageTargets = getComplaintWorkflowTargets($conn);
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+if (
+    $_SERVER['REQUEST_METHOD'] === 'POST'
+    && ($_POST['workflow_action'] ?? '') !== 'save_stage_targets'
+) {
     $newSlaDays = filter_var($_POST['sla_business_days'] ?? null, FILTER_VALIDATE_INT);
     if (!isValidCsrfToken($_POST['csrf_token'] ?? null)) {
         $errorMessage = 'Your form session expired. Please try again.';
@@ -42,6 +48,66 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
+if (
+    $_SERVER['REQUEST_METHOD'] === 'POST'
+    && ($_POST['workflow_action'] ?? '') === 'save_stage_targets'
+) {
+    $newStageTargets = [];
+    if (!isValidCsrfToken($_POST['csrf_token'] ?? null)) {
+        $errorMessage = 'Your form session expired. Please try again.';
+    } else {
+        $submittedStageTargets = $_POST['stage_targets'] ?? null;
+        if (!is_array($submittedStageTargets)) {
+            $errorMessage = 'Submit a valid set of workflow targets.';
+        } else {
+            foreach ($stageTargetDefinitions as $stage => $definition) {
+                $target = filter_var($submittedStageTargets[$stage] ?? null, FILTER_VALIDATE_INT);
+                if (!is_int($target) || $target < 0 || $target > 365) {
+                    $errorMessage = 'Each stage target must be a whole number from 0 to 365 calendar days.';
+                    break;
+                }
+                $newStageTargets[$stage] = $target;
+            }
+        }
+    }
+
+    if ($errorMessage === '') {
+        $conn->begin_transaction();
+        try {
+            $targetChanges = [];
+            foreach ($stageTargetDefinitions as $stage => $definition) {
+                $targetChanges[$stage] = [
+                    'before' => $stageTargets[$stage],
+                    'after' => $newStageTargets[$stage]
+                ];
+                savePortalSetting(
+                    $conn,
+                    $definition['setting'],
+                    (string) $newStageTargets[$stage],
+                    (int) $currentUser['id']
+                );
+            }
+            recordAuditEvent(
+                $conn,
+                (int) $currentUser['id'],
+                'settings.workflow_targets_updated',
+                'system_settings',
+                'complaint_workflow_targets',
+                'Complaint workflow calendar-day targets were updated.',
+                $targetChanges
+            );
+            $conn->commit();
+            $_SESSION['flash_success'] = 'Complaint workflow targets saved.';
+            header('Location: admin_workflow.php');
+            exit;
+        } catch (mysqli_sql_exception $exception) {
+            $conn->rollback();
+            error_log('Complaint workflow target update failed: ' . $exception->getMessage());
+            $errorMessage = 'Workflow targets could not be saved because of a database error.';
+        }
+    }
+}
+
 $counts = $conn->query(
     "SELECT
         SUM(due_at IS NOT NULL AND due_at < NOW() AND status NOT IN ('Closed', 'Resolved', 'Rejected')) AS overdue,
@@ -58,6 +124,7 @@ $overdueComplaints = $conn->query(
      ORDER BY due_at ASC, id ASC
      LIMIT 100"
 )->fetch_all(MYSQLI_ASSOC);
+$workflowStageLabels = getComplaintWorkflowStageLabels($conn, $overdueComplaints);
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -88,6 +155,26 @@ $overdueComplaints = $conn->query(
                 <button class="primary-button" type="submit">Save SLA</button>
             </form>
         </section>
+        <section class="admin-settings-section">
+            <div class="admin-section-heading"><div><h2>Complaint workflow targets</h2><p>Durations use calendar days. A reason is required when a completed stage exceeds its configured target. Set 0 to track elapsed time without an overdue target.</p></div></div>
+            <form method="POST" class="admin-inline-form">
+                <input type="hidden" name="csrf_token" value="<?php echo escapeHtml($csrfToken); ?>">
+                <input type="hidden" name="workflow_action" value="save_stage_targets">
+                <?php foreach ($stageTargetDefinitions as $stage => $definition): ?>
+                    <label for="stage-target-<?php echo escapeHtml($stage); ?>"><?php echo escapeHtml($definition['label']); ?></label>
+                    <input
+                        id="stage-target-<?php echo escapeHtml($stage); ?>"
+                        type="number"
+                        name="stage_targets[<?php echo escapeHtml($stage); ?>]"
+                        min="0"
+                        max="365"
+                        value="<?php echo (int) $stageTargets[$stage]; ?>"
+                        required
+                    >
+                <?php endforeach; ?>
+                <button class="primary-button" type="submit">Save workflow targets</button>
+            </form>
+        </section>
         <div class="admin-stat-grid">
             <div class="admin-stat-card"><span>Overdue</span><strong><?php echo (int) $counts['overdue']; ?></strong></div>
             <div class="admin-stat-card"><span>Due in the next 2 days</span><strong><?php echo (int) $counts['due_soon']; ?></strong></div>
@@ -104,7 +191,7 @@ $overdueComplaints = $conn->query(
                             <td><strong><?php echo escapeHtml(formatComplaintReference((int) $complaint['id'], $complaint['public_reference'])); ?></strong><br><?php echo escapeHtml($complaint['title']); ?></td>
                             <td><?php echo escapeHtml($complaint['district']); ?></td>
                             <td><?php echo escapeHtml($complaint['department']); ?></td>
-                            <td><span class="admin-status admin-status--danger"><?php echo escapeHtml($complaint['status']); ?></span></td>
+                            <td><span class="admin-status admin-status--danger"><?php echo escapeHtml($complaint['status']); ?></span><br><small class="workflow-stage-label">Stage: <?php echo escapeHtml($workflowStageLabels[(int) $complaint['id']] ?? 'Workflow stage unavailable'); ?></small></td>
                             <td><?php echo escapeHtml(date('M j, Y', strtotime($complaint['due_at']))); ?></td>
                             <td><a class="secondary-button" href="admin_edit_complaint.php?id=<?php echo (int) $complaint['id']; ?>">Review</a></td>
                         </tr>

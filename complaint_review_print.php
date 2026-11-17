@@ -51,7 +51,9 @@ $attachmentPurposeLabels = [
     'return' => 'Faulty material return proof',
     'qc_test_report' => 'QC testing report',
     'material_supply_proof' => 'Material supply proof',
-    'department_evidence' => 'Department evidence'
+    'department_evidence' => 'Department evidence',
+    'erp_so' => 'ERP SO copy',
+    'material_out_proof' => 'Material-out proof'
 ];
 $attachments = fetchComplaintRows(
     $conn,
@@ -61,7 +63,7 @@ $attachments = fetchComplaintRows(
      INNER JOIN complaints c ON c.id = a.complaint_id
      LEFT JOIN users u ON u.id = a.uploaded_by
      WHERE c.id = {$complaintId}
-       AND a.purpose IN ('complaint', 'sample', 'return', 'qc_test_report', 'material_supply_proof', 'department_evidence')
+       AND a.purpose IN ('complaint', 'sample', 'return', 'qc_test_report', 'material_supply_proof', 'department_evidence', 'erp_so', 'material_out_proof')
        AND {$scope['where']}
      ORDER BY a.id",
     $scope

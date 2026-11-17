@@ -1644,6 +1644,14 @@ a {
     gap: 8px;
 }
 
+.workflow-stage-label {
+    display: block;
+    margin-top: 5px;
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.4;
+}
+
 .complaint-card-status time {
     color: var(--muted);
     font-size: 11px;

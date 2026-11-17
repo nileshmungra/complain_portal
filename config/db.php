@@ -116,6 +116,7 @@ $conn->query(
         status VARCHAR(20) NOT NULL DEFAULT 'Pending',
         decided_by INT DEFAULT NULL,
         decided_at DATETIME DEFAULT NULL,
+        decision_reason TEXT DEFAULT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         INDEX idx_complaint_approvals_status_created (status, created_at),
         CONSTRAINT fk_complaint_approval_complaint
@@ -124,6 +125,11 @@ $conn->query(
             FOREIGN KEY (decided_by) REFERENCES users(id) ON DELETE SET NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
 );
+
+$approvalReasonColumn = $conn->query("SHOW COLUMNS FROM complaint_approvals LIKE 'decision_reason'");
+if ($approvalReasonColumn->num_rows === 0) {
+    $conn->query('ALTER TABLE complaint_approvals ADD COLUMN decision_reason TEXT DEFAULT NULL AFTER decided_at');
+}
 
 $statusColumn = $conn->query("SHOW COLUMNS FROM complaints LIKE 'status'")->fetch_assoc();
 if ($statusColumn && $statusColumn['Default'] !== 'Pending') {
@@ -464,16 +470,70 @@ $conn->query(
         complaint_id INT NOT NULL,
         department VARCHAR(100) NOT NULL,
         assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        approval_required TINYINT(1) NOT NULL DEFAULT 1,
+        approved_at DATETIME DEFAULT NULL,
+        approved_by INT DEFAULT NULL,
+        approval_reason TEXT DEFAULT NULL,
         PRIMARY KEY (complaint_id, department),
         INDEX idx_assignments_department (department, complaint_id),
+        CONSTRAINT fk_assignments_approver
+            FOREIGN KEY (approved_by) REFERENCES users(id) ON DELETE SET NULL,
         CONSTRAINT fk_assignments_complaint
             FOREIGN KEY (complaint_id) REFERENCES complaints(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
 );
 
+$assignmentWorkflowColumns = [
+    'approval_required' => 'TINYINT(1) NOT NULL DEFAULT 1',
+    'approved_at' => 'DATETIME DEFAULT NULL',
+    'approved_by' => 'INT DEFAULT NULL',
+    'approval_reason' => 'TEXT DEFAULT NULL'
+];
+foreach ($assignmentWorkflowColumns as $column => $definition) {
+    if ($conn->query("SHOW COLUMNS FROM complaint_department_assignments LIKE '{$column}'")->num_rows === 0) {
+        $conn->query("ALTER TABLE complaint_department_assignments ADD COLUMN {$column} {$definition}");
+    }
+}
+$assignmentApproverConstraint = $conn->query(
+    "SELECT 1 FROM information_schema.REFERENTIAL_CONSTRAINTS
+     WHERE CONSTRAINT_SCHEMA = DATABASE() AND CONSTRAINT_NAME = 'fk_assignments_approver' LIMIT 1"
+);
+if ($assignmentApproverConstraint->num_rows === 0) {
+    $conn->query(
+        'ALTER TABLE complaint_department_assignments
+         ADD CONSTRAINT fk_assignments_approver
+         FOREIGN KEY (approved_by) REFERENCES users(id) ON DELETE SET NULL'
+    );
+}
+
 $conn->query(
-    "INSERT IGNORE INTO complaint_department_assignments (complaint_id, department)
-     SELECT id, department
+    "CREATE TABLE IF NOT EXISTS complaint_workflow (
+        complaint_id INT PRIMARY KEY,
+        so_number VARCHAR(100) DEFAULT NULL,
+        so_created_at DATETIME DEFAULT NULL,
+        so_created_by INT DEFAULT NULL,
+        so_creation_delay_reason TEXT DEFAULT NULL,
+        dispatch_sent_at DATETIME DEFAULT NULL,
+        dispatch_sent_by INT DEFAULT NULL,
+        dispatch_delay_reason TEXT DEFAULT NULL,
+        material_out_at DATETIME DEFAULT NULL,
+        material_out_by INT DEFAULT NULL,
+        material_out_delay_reason TEXT DEFAULT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_workflow_complaint
+            FOREIGN KEY (complaint_id) REFERENCES complaints(id) ON DELETE CASCADE,
+        CONSTRAINT fk_workflow_so_user
+            FOREIGN KEY (so_created_by) REFERENCES users(id) ON DELETE SET NULL,
+        CONSTRAINT fk_workflow_dispatch_user
+            FOREIGN KEY (dispatch_sent_by) REFERENCES users(id) ON DELETE SET NULL,
+        CONSTRAINT fk_workflow_material_out_user
+            FOREIGN KEY (material_out_by) REFERENCES users(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+);
+
+$conn->query(
+    "INSERT IGNORE INTO complaint_department_assignments (complaint_id, department, approval_required)
+     SELECT id, department, 0
      FROM complaints
      WHERE department IN ('Dispatch', 'Store', 'QC', 'Production')
        AND NOT EXISTS (
@@ -482,6 +542,21 @@ $conn->query(
            WHERE ca.complaint_id = complaints.id AND ca.status <> 'Approved'
        )"
 );
+
+$departmentApprovalMigration = 'department-approval-stage-start-v1';
+$departmentApprovalMigrationStatement = $conn->prepare(
+    'SELECT migration_key FROM schema_migrations WHERE migration_key = ?'
+);
+$departmentApprovalMigrationStatement->bind_param('s', $departmentApprovalMigration);
+$departmentApprovalMigrationStatement->execute();
+if ($departmentApprovalMigrationStatement->get_result()->num_rows === 0) {
+    $conn->query('UPDATE complaint_department_assignments SET approval_required = 0');
+    $departmentApprovalMigrationStatement = $conn->prepare(
+        'INSERT INTO schema_migrations (migration_key) VALUES (?)'
+    );
+    $departmentApprovalMigrationStatement->bind_param('s', $departmentApprovalMigration);
+    $departmentApprovalMigrationStatement->execute();
+}
 
 $conn->query(
     "CREATE TABLE IF NOT EXISTS products (

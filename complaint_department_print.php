@@ -43,7 +43,7 @@ $departmentEvidence = fetchComplaintRows(
      INNER JOIN complaints c ON c.id = a.complaint_id
      LEFT JOIN users u ON u.id = a.uploaded_by
      WHERE c.id = {$complaintId}
-       AND a.purpose IN ('qc_test_report', 'material_supply_proof', 'department_evidence')
+       AND a.purpose IN ('qc_test_report', 'material_supply_proof', 'department_evidence', 'erp_so', 'material_out_proof')
        AND {$scope['where']}
      ORDER BY a.created_at, a.id",
     $scope
@@ -51,7 +51,9 @@ $departmentEvidence = fetchComplaintRows(
 $departmentEvidenceLabels = [
     'qc_test_report' => 'QC testing report',
     'material_supply_proof' => 'Material supply proof',
-    'department_evidence' => 'Department evidence'
+    'department_evidence' => 'Department evidence',
+    'erp_so' => 'ERP SO copy',
+    'material_out_proof' => 'Material-out proof'
 ];
 $eventAttachments = fetchComplaintRows(
     $conn,
@@ -166,9 +168,9 @@ $actualQuantity = $complaint['actual_quantity_supplied'] !== null
         </section>
 
         <section class="print-card">
-            <h2>Department reports and supply proof</h2>
+            <h2>Department reports, ERP SO and dispatch proof</h2>
             <?php if ($departmentEvidence === []): ?>
-                <p>No department reports or supply proof have been uploaded.</p>
+                <p>No department, ERP SO or dispatch proof has been uploaded.</p>
             <?php else: ?>
                 <?php foreach ($departmentEvidence as $evidence): ?>
                     <article class="evidence-entry">

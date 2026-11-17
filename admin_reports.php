@@ -2,6 +2,7 @@
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/admin_navigation.php';
 require_once __DIR__ . '/includes/complaint_filters.php';
+require_once __DIR__ . '/includes/complaint_workflow.php';
 
 requireAdministrator($currentUser);
 
@@ -29,6 +30,7 @@ $preview = fetchComplaintRows(
      LIMIT 50",
     $scope
 );
+$workflowStageLabels = getComplaintWorkflowStageLabels($conn, $preview);
 $exportQuery = http_build_query($filterState['activeFilters']);
 $exportSuffix = $exportQuery !== '' ? '?' . $exportQuery : '';
 ?>
@@ -85,7 +87,7 @@ $exportSuffix = $exportQuery !== '' ? '?' . $exportQuery : '';
                             <td><?php echo escapeHtml($complaint['complaint_type']); ?></td>
                             <td><?php echo escapeHtml($complaint['product']); ?></td>
                             <td><?php echo escapeHtml($complaint['district']); ?></td>
-                            <td><?php echo escapeHtml($complaint['status']); ?></td>
+                            <td><?php echo escapeHtml($complaint['status']); ?><br><small class="workflow-stage-label">Stage: <?php echo escapeHtml($workflowStageLabels[(int) $complaint['id']] ?? 'Workflow stage unavailable'); ?></small></td>
                             <td><?php echo $complaint['created_at'] ? escapeHtml(date('M j, Y', strtotime($complaint['created_at']))) : '—'; ?></td>
                         </tr>
                     <?php endforeach; ?>

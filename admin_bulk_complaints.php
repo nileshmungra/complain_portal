@@ -2,6 +2,7 @@
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/admin_navigation.php';
 require_once __DIR__ . '/includes/complaint_filters.php';
+require_once __DIR__ . '/includes/complaint_workflow.php';
 
 requireAdministrator($currentUser);
 
@@ -69,10 +70,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 )
                 : null;
             $deleteAssignments = $replaceDepartments
-                ? $conn->prepare('DELETE FROM complaint_department_assignments WHERE complaint_id = ?')
+                ? $conn->prepare(
+                    'DELETE FROM complaint_department_assignments
+                     WHERE complaint_id = ? AND department = ?'
+                )
                 : null;
             $insertAssignment = $replaceDepartments
-                ? $conn->prepare('INSERT INTO complaint_department_assignments (complaint_id, department) VALUES (?, ?)')
+                ? $conn->prepare('INSERT IGNORE INTO complaint_department_assignments (complaint_id, department) VALUES (?, ?)')
+                : null;
+            $selectAssignments = $replaceDepartments
+                ? $conn->prepare(
+                    'SELECT department FROM complaint_department_assignments
+                     WHERE complaint_id = ?'
+                )
                 : null;
             $statusChangedCount = 0;
             foreach ($selectedComplaints as $complaint) {
@@ -80,20 +90,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $beforeDepartments = array_values(array_filter(array_map('trim', explode(',', $complaint['department']))));
                 $statusChanged = $status !== '' && $status !== $complaint['status'];
                 $newDepartments = $replaceDepartments ? array_values(array_unique($departments)) : $beforeDepartments;
-                $departmentsChanged = $replaceDepartments
-                    && (
-                        array_diff($newDepartments, $beforeDepartments) !== []
-                        || array_diff($beforeDepartments, $newDepartments) !== []
-                    );
+                $departmentsChanged = false;
+                $newlyAssignedDepartments = [];
 
                 if ($status !== '') {
                     $statusStatement->bind_param('ssi', $status, $status, $complaintId);
                     $statusStatement->execute();
                 }
                 if ($replaceDepartments) {
-                    $deleteAssignments->bind_param('i', $complaintId);
-                    $deleteAssignments->execute();
-                    foreach ($newDepartments as $department) {
+                    $selectAssignments->bind_param('i', $complaintId);
+                    $selectAssignments->execute();
+                    $existingDepartments = array_column(
+                        $selectAssignments->get_result()->fetch_all(MYSQLI_ASSOC),
+                        'department'
+                    );
+                    $newlyAssignedDepartments = array_values(array_unique(array_merge(
+                        array_diff($newDepartments, $beforeDepartments),
+                        array_diff($newDepartments, $existingDepartments)
+                    )));
+                    $departmentsChanged = $newlyAssignedDepartments !== []
+                        || array_diff($beforeDepartments, $newDepartments) !== []
+                        || array_diff($existingDepartments, $newDepartments) !== [];
+                    foreach (array_diff($existingDepartments, $newDepartments) as $department) {
+                        $deleteAssignments->bind_param('is', $complaintId, $department);
+                        $deleteAssignments->execute();
+                    }
+                    foreach (array_diff($newDepartments, $existingDepartments) as $department) {
                         $insertAssignment->bind_param('is', $complaintId, $department);
                         $insertAssignment->execute();
                     }
@@ -114,13 +136,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $complaintId
                     );
                 }
-                if ($departmentsChanged) {
+                if ($newlyAssignedDepartments !== []) {
                     notifyComplaintDepartments(
                         $conn,
-                        array_values(array_diff($newDepartments, $beforeDepartments)),
+                        $newlyAssignedDepartments,
                         'assignment',
                         'Complaint assigned to your department',
-                        formatComplaintReference($complaintId, $complaint['public_reference']) . ' has been assigned to ' . implode(', ', $newDepartments) . '.',
+                        formatComplaintReference($complaintId, $complaint['public_reference']) . ' has been assigned to ' . implode(', ', $newlyAssignedDepartments) . '.',
                         $complaintId
                     );
                 }
@@ -177,6 +199,7 @@ $complaints = fetchComplaintRows(
      LIMIT {$pageSize} OFFSET {$offset}",
     $scope
 );
+$workflowStageLabels = getComplaintWorkflowStageLabels($conn, $complaints);
 $filterQuery = $filterState['activeFilters'];
 ?>
 <!DOCTYPE html>
@@ -220,7 +243,7 @@ $filterQuery = $filterState['activeFilters'];
                             <td><a href="admin_edit_complaint.php?id=<?php echo (int) $complaint['id']; ?>"><?php echo escapeHtml(formatComplaintReference((int) $complaint['id'], $complaint['public_reference'])); ?></a><br><?php echo escapeHtml($complaint['title']); ?></td>
                             <td><?php echo escapeHtml($complaint['farmer_name']); ?><br><small><?php echo escapeHtml($complaint['district']); ?></small></td>
                             <td><?php echo escapeHtml($complaint['department']); ?></td>
-                            <td><?php echo escapeHtml($complaint['status']); ?></td>
+                            <td><?php echo escapeHtml($complaint['status']); ?><br><small class="workflow-stage-label">Stage: <?php echo escapeHtml($workflowStageLabels[(int) $complaint['id']] ?? 'Workflow stage unavailable'); ?></small></td>
                             <td><?php echo $complaint['created_at'] ? escapeHtml(date('M j, Y', strtotime($complaint['created_at']))) : '—'; ?></td>
                         </tr>
                     <?php endforeach; ?>

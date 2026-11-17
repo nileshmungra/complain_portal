@@ -353,6 +353,9 @@ if ($materialEvents !== []) {
                     <p class="page-subtitle"><?php echo escapeHtml($complaint['farmer_name'] . ' · ' . $complaint['title']); ?></p>
                 </div>
                 <div class="complaint-list-actions">
+                    <?php if (in_array($currentUser['role'], ['admin', 'department'], true)): ?>
+                        <a class="secondary-button" href="complaint_workflow.php?id=<?php echo (int) $complaintId; ?>">Approval / ERP SO workflow</a>
+                    <?php endif; ?>
                     <a class="secondary-button" href="complaint_department_print.php?id=<?php echo (int) $complaintId; ?>" target="_blank" rel="noopener noreferrer">Department print / PDF</a>
                     <a class="secondary-button" href="dashboard.php#complaint-list">Back to complaints</a>
                 </div>

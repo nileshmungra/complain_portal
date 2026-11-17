@@ -1,5 +1,6 @@
 <?php
 require_once __DIR__ . '/includes/auth.php';
+require_once __DIR__ . '/includes/complaint_workflow.php';
 
 if ($currentUser['role'] !== 'area_manager') {
     http_response_code(403);
@@ -7,6 +8,7 @@ if ($currentUser['role'] !== 'area_manager') {
 }
 
 $config = require __DIR__ . '/config/complaints.php';
+$workflowTargets = getComplaintWorkflowTargets($conn);
 $approvalScope = getComplaintScope($currentUser);
 $errorMessage = '';
 $successMessage = $_SESSION['flash_success'] ?? '';
@@ -16,6 +18,9 @@ $csrfToken = getCsrfToken();
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $complaintId = filter_var($_POST['complaint_id'] ?? null, FILTER_VALIDATE_INT);
     $action = $_POST['approval_action'] ?? '';
+    $decisionReason = is_string($_POST['decision_reason'] ?? null)
+        ? trim($_POST['decision_reason'])
+        : '';
 
     if (!isValidCsrfToken($_POST['csrf_token'] ?? null)) {
         $errorMessage = 'Your form session expired. Please try again.';
@@ -23,11 +28,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $errorMessage = 'Select a valid complaint.';
     } elseif (!in_array($action, ['approve', 'reject'], true)) {
         $errorMessage = 'Choose whether to approve or reject this complaint.';
+    } elseif (mb_strlen($decisionReason, 'UTF-8') > 2000) {
+        $errorMessage = 'The delay reason must be 2,000 characters or fewer.';
     } else {
         $conn->begin_transaction();
         try {
             $selectStatement = $conn->prepare(
-                "SELECT c.id, c.public_reference, c.title, c.created_by, c.department, c.district
+                "SELECT c.id, c.public_reference, c.title, c.created_by, c.department, c.district, c.created_at
                  FROM complaint_approvals ca
                  INNER JOIN complaints c ON c.id = ca.complaint_id
                  WHERE ca.complaint_id = ?
@@ -51,14 +58,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $conn->rollback();
                 $errorMessage = 'This complaint is no longer awaiting approval or is outside your assigned districts.';
             } else {
+                $decisionAt = $conn->query('SELECT NOW() AS db_now')->fetch_assoc()['db_now'];
+                if (
+                    complaintWorkflowDelayIsOverdue(
+                        $complaint['created_at'],
+                        $decisionAt,
+                        $workflowTargets['area_manager_approval']
+                    )
+                    && $decisionReason === ''
+                ) {
+                    $conn->rollback();
+                    $errorMessage = 'This approval is over its ' . $workflowTargets['area_manager_approval']
+                        . '-day target. Enter the delay reason before deciding.';
+                } else {
                 $approvalStatus = $action === 'approve' ? 'Approved' : 'Rejected';
                 $managerId = (int) $currentUser['id'];
                 $updateApproval = $conn->prepare(
                     "UPDATE complaint_approvals
-                     SET status = ?, decided_by = ?, decided_at = NOW()
+                     SET status = ?, decided_by = ?, decided_at = NOW(), decision_reason = ?
                      WHERE complaint_id = ? AND status = 'Pending'"
                 );
-                $updateApproval->bind_param('sii', $approvalStatus, $managerId, $complaintId);
+                $storedDecisionReason = $decisionReason !== '' ? $decisionReason : null;
+                $updateApproval->bind_param('sisi', $approvalStatus, $managerId, $storedDecisionReason, $complaintId);
                 $updateApproval->execute();
                 if ($updateApproval->affected_rows !== 1) {
                     throw new RuntimeException('This complaint has already been reviewed.');
@@ -140,6 +161,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     : $reference . ' rejected.';
                 header('Location: area_manager_approvals.php');
                 exit;
+                }
             }
         } catch (Throwable $exception) {
             $conn->rollback();
@@ -218,17 +240,21 @@ $pendingApprovals = fetchComplaintRows(
                             <td><?php echo escapeHtml($complaint['complaint_type']); ?><br><small><?php echo escapeHtml($complaint['product']); ?></small></td>
                             <td><?php echo escapeHtml($complaint['submitted_by']); ?><br><small><?php echo escapeHtml(date('M j, Y H:i', strtotime($complaint['created_at']))); ?></small></td>
                             <td>
-                                <div class="admin-inline-form">
-                                    <form method="POST">
+                                                <div class="admin-inline-form">
+                                                    <form method="POST" class="form-stack">
                                         <input type="hidden" name="csrf_token" value="<?php echo escapeHtml($csrfToken); ?>">
                                         <input type="hidden" name="complaint_id" value="<?php echo (int) $complaint['id']; ?>">
                                         <input type="hidden" name="approval_action" value="approve">
+                                                        <label for="approve-reason-<?php echo (int) $complaint['id']; ?>">Delay reason (<?php echo $workflowTargets['area_manager_approval'] > 0 ? 'required if over ' . (int) $workflowTargets['area_manager_approval'] . ' days' : 'optional; no target configured'; ?>)</label>
+                                                        <textarea id="approve-reason-<?php echo (int) $complaint['id']; ?>" name="decision_reason" maxlength="2000"></textarea>
                                         <button class="primary-button" type="submit">Approve</button>
                                     </form>
-                                    <form method="POST">
+                                                    <form method="POST" class="form-stack">
                                         <input type="hidden" name="csrf_token" value="<?php echo escapeHtml($csrfToken); ?>">
                                         <input type="hidden" name="complaint_id" value="<?php echo (int) $complaint['id']; ?>">
                                         <input type="hidden" name="approval_action" value="reject">
+                                                        <label for="reject-reason-<?php echo (int) $complaint['id']; ?>">Delay reason (<?php echo $workflowTargets['area_manager_approval'] > 0 ? 'required if over ' . (int) $workflowTargets['area_manager_approval'] . ' days' : 'optional; no target configured'; ?>)</label>
+                                                        <textarea id="reject-reason-<?php echo (int) $complaint['id']; ?>" name="decision_reason" maxlength="2000"></textarea>
                                         <button class="danger-button" type="submit">Reject</button>
                                     </form>
                                 </div>
